@@ -4,57 +4,81 @@ use strict;
 
 use Getopt::Long;
 use Pod::Usage;
+use Switch;
 
+# default options
 my $help = 0;
 my $fps = 23.976;
 my $from = "mdvd";
 my $to = "mpl2";
+my $eol = "\r\n";
 
 sub read_raw_input
 {
     return <>;
 }
 
+sub auto_detect_format
+{
+    # to do
+}
+
 sub format_mdvd_mpl2
 {
     my $match = 0;
+    # convert mdvd tags to mpl2
     foreach(@{$_}[3..$#{$_}])
     {
-        # mdvd tags
         # remove useless tags
         s/\{[^yY]:.+?\}//g;
         # remove Y:u and Y:b
         s/\{[y|Y]:[^i]\}//g;
         # swap y:i to /
-        s/\{y:i\}/\//g;
+        s/^\{y:i\}/\//g;
         # seek for Y:i
-        $match = 1 if (/\{Y:i\}/);
+        $match = 1 if (/^\{Y:i\}/);
         # replace Y:i by adding / to all lines
         s/^\{Y:i\}|^/\//g if ($match);
-
-        # srt tags
-        # remove useless tags
-        # to do
+        # remove tags inside subtitles
+        s/\{[Yy]:i\}//g;
     }
+    # to-do
+    # parse y:I, y:UbI
 }
 
 sub format_srt_mpl2
 {
-    my $match = 0;
+    # convert srt tags to mpl2
     foreach(@{$_}[3..$#{$_}])
     {
-        # srt tags
         # remove useless tags (+2-letters)
         s/<\/?[^>\/]{2,}?>//g;
         # remove 1-letter tags w/o italic
         s/<\/?[^iI]?>//g;
-        # to do
+        # if line starts with tag
+        if (/^<[iI]>/)
+        {
+            # replace tag
+            s/^<[iI]>/\//;
+            # remove tag-closing if exists in line
+            s/<\/[iI]>$//;
+        }
+        # if line ends with tag
+        elsif (/<\/[iI]>$/)
+        {
+            # add / to line start
+            s/<\/[iI]>$//;
+            s/^/\//;
+        }
+        # remove tags inside subtitles
+        s/<\/?[iI]>//g;
     }
 }
 
-sub format_mdvd
+sub format_mpl2_mdvd
 {
     my $slashes = 0;
+    # convert mpl2 tags to mdvd
     foreach(@{$_}[3..$#{$_}])
     {
         $slashes++ if (/^\//);
@@ -74,13 +98,70 @@ sub format_mdvd
             s/^\//\{y:i\}/;
         }
     }
-    # srt tags
+}
+
+sub format_mpl2_srt
+{
+    my $s = 0;
+    my $e = 0;
+    for (my $i = 3; $i <= $#{$_}+1; $i++)
+    {
+        if ($_->[$i] =~ /^\// and $s == 0)
+        {
+            $s = $i;
+            $e = $i;
+        }
+        elsif  ($_->[$i] =~ /^\//)
+        {
+            $_->[$i] =~ s/^\///;
+            $e = $i;
+        }
+        else
+        {
+            $_->[$s] =~ s/^\//<i>/;
+            $_->[$e] =~ s/$/<\/i>/;
+            $s = 0;
+            $e = 0;
+        }
+    }
+}
+
+sub format_mdvd_srt
+{
     # to do
 }
 
-sub format_srt
+sub format_srt_mdvd
 {
     # to do
+}
+
+sub format_tags
+{
+    if ($from eq "mdvd")
+    {
+        switch($to)
+        {
+            case "mpl2" { format_mdvd_mpl2(\@{$_}); }
+            case "srt" { format_mdvd_srt(\@{$_}); }
+        }
+    }
+    elsif ($from eq "mpl2")
+    {
+        switch($to)
+        {
+            case "mdvd" { format_mpl2_mdvd(\@{$_}); }
+            case "srt" { format_mpl2_srt(\@{$_}); }
+        }
+    }
+    elsif ($from eq "srt")
+    {
+        switch($to)
+        {
+            case "mpl2" { format_srt_mpl2(\@{$_}); }
+            case "mdvd" { format_srt_mdvd(\@{$_}); }
+        }
+    }
 }
 
 sub from_mdvd
@@ -168,7 +249,7 @@ sub to_mdvd {
     push(@subtitles, "{1}{1}$fps");
     foreach(@$lines)
     {
-        format_mdvd(\@{$_});
+        format_tags(\@{$_});
         push(@subtitles,
             sprintf "{%d}{%d}%s", int(($_->[1]/1000)*$fps), int(($_->[2]/1000)*$fps), join('|', @{$_}[3..$#{$_}]));
     }
@@ -182,12 +263,24 @@ sub to_mpl2
 
     foreach(@$lines)
     {
-        #format_mpl2(\@{$_});
-        format_srt_mpl2(\@{$_});
+        format_tags(\@{$_});
         push(@subtitles,
             sprintf "[%d][%d]%s", $_->[1]/100, $_->[2]/100, join('|', @{$_}[3..$#{$_}]));
     }
     return @subtitles;
+}
+
+sub srt_time
+{
+    # from time in miliseconds make string in srt time format: hh:mm:ss,mmm
+    my ($time) = @_;
+    my $ms = $time % 1000;
+    my $sec = int($time / 1000);
+    my $min = int($sec / 60);
+    $sec %= 60;
+    my $hour = int($min / 60);
+    $min %= 60;
+    return sprintf "%02d:%02d:%02d,%03d", $hour, $min, $sec, $ms;
 }
 
 sub to_srt {
@@ -197,14 +290,11 @@ sub to_srt {
     foreach(@$lines)
     {
         push(@subtitles, "$_->[0]");
-        my $start = sprintf "%09d", $_->[1];
-        my $stop = sprintf "%09d", $_->[2];
-        my $time = sprintf "%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d", substr($start, 0, 2), substr($start, 2, 2), substr($start, 4, 2), substr($start, 6, 3), substr($stop, 0, 2), substr($stop, 2, 2), substr($stop, 4, 2), substr($stop, 6, 3);
-        push(@subtitles, $time);
+        push(@subtitles,
+            sprintf "%s --> %s", srt_time($_->[1]), srt_time($_->[2]));
+        format_tags(\@{$_});
         foreach(@{$_}[3..$#{$_}])
         {
-            # format srt
-            # to-do
             push(@subtitles, "$_");
         }
         push(@subtitles, ""); # blank
@@ -218,7 +308,7 @@ sub write_raw_output
     my $lines = $_[0];
     foreach(@$lines)
     {
-        print "$_\n";
+        print "$_$eol";
     }
 }
 
@@ -237,32 +327,41 @@ sub debug_write
 
 sub main
 {
+    # read subtitles from file or STDIN if file omitted
     my @lines = read_raw_input();
-    #my @sub1 = from_mdvd(\@lines);
-    my @sub1 = from_srt(\@lines);
-    my @sub2 = to_mpl2(\@sub1);
+    my (@sub1, @sub2);
 
-    #my @sub1 = from_mpl2(\@lines);
-    #my @sub1 = from_srt(\@lines);
-    #my @sub2 = to_mdvd(\@sub1);
+    switch ($from)
+    {
+        case "mdvd" { @sub1 = from_mdvd(\@lines); }
+        case "mpl2" { @sub1 = from_mpl2(\@lines); }
+        case "srt" { @sub1 = from_srt(\@lines); }
+    }
 
-    #my @sub1 = from_mdvd(\@lines);
-    #my @sub1 = from_mpl2(\@lines);
-    #my @sub2 = to_srt(\@sub1);
+    switch ($to)
+    {
+        case "mdvd" { @sub2 = to_mdvd(\@sub1); }
+        case "mpl2" { @sub2 = to_mpl2(\@sub1); }
+        case "srt" { @sub2 = to_srt(\@sub1); }
+    }
 
+    # write everything to STDOUT
     write_raw_output(\@sub2);
     #debug_write(\@sub1);
 }
 
-GetOptions ("h" => \$help,
+# read the options
+GetOptions ("help|h" => \$help,
             "f=f" => \$fps,
             "i=s" => \$from,
             "o=s" => \$to,
             ) or pod2usage(2);
 
+# show help message if needed
 pod2usage(1) if $help;
-# ssie jak jest bez argumentny
-main();
+
+# run the script
+main($from, $to);
 
 __END__
 
@@ -270,37 +369,34 @@ __END__
 
 sub2sub - Subtitle format converter.
 
+=head1 DESCRIPTION
+
+B<This program> will convert subtitle in given format to another. It also converts
+control tags. Convertable formats are MicroDVD, SubRip (Srt) and Mpl2.
+
 =head1 SYNOPSIS
 
-sub2sub [options]
-
-"perlcmdline --help" will list options.  "perlcmdline --man"
-will show docs.
+sub2sub [-f fps] [-o output_format] [-i input_format] [-h] subfilename
 
 =head1 OPTIONS
 
 =over 4
 
-=item B<--help>
+=item B<-h>
 
 Print a brief help message and exits.
 
-=item B<--man>
+=item B<-f>
 
-Prints the manual page and exits.
+Give an fps for frame-based subtitles. (Default is 23.976)
 
-=item B<--length positive-integer>
+=item B<-i>
 
-A "do nothing" length value which must be an int > 0.
+Input subtitle format.
 
-=item B<--filename input-filename>
+=item B<-o>
 
-A "do nothing" string value.
-
-=item B<--addr hostname-or-ip>
-
-An internet address.  This option may be used multiple
-times in a single command to specify multiple addresses.
+Output subtitle format.
 
 =back
 
